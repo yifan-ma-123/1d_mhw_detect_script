@@ -583,7 +583,6 @@ if __name__ == "__main__":
         parallel=True,
         n_workers=n_workers
     )
-    import pdb; pdb.set_trace()
 
     print(f"Data processing completed in {time.time() - processing_start_time:.2f} seconds")
     
