@@ -377,7 +377,7 @@ def process_temp_data_in_chunks(mesh, years, arctic_nodes, depth_layers, chunk_s
                 delayed_tasks = []
                 for chunk_idx, node_chunk in enumerate(node_chunks):
                     # Use dask.delayed to properly wrap the function for distributed execution
-                    task = dask.delayed(process_single_chunk)(mesh, years, chunk_idx, node_chunk, depth_idx)
+                    task = process_single_chunk(mesh, years, chunk_idx, node_chunk, depth_idx)
                     delayed_tasks.append((chunk_idx, node_chunk, task))
                 
                 # Compute all tasks in parallel
