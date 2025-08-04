@@ -27,11 +27,11 @@ import calendar
 import sys
 
 # Load FESOM2 mesh and set data paths
-mesh = pf.load_mesh('./data/core2/')
-datapath = "./data/"
-temp_var_name = "temp" # Variable name for temperature data
-start_year = 1850
-end_year = 1851
+mesh = pf.load_mesh('/proj/awi/input/fesom2/dart/')
+datapath = "/scratch/awicm3-TCo319/GibbsR_free/hi1950d/outdata/fesom/"
+temp_var_name = "temp1-31" # Variable name for temperature data
+start_year = 1950
+end_year = 1951
 output_path = "./output/" # Path to save output
 
 # Create output directory if it doesn't exist
@@ -41,7 +41,7 @@ os.makedirs(output_path, exist_ok=True)
 verbose = True
 
 # Configuration parameters
-n_workers = 4  # Number of Dask worker processes (adjust based on your CPU cores)
+n_workers = 20  # Number of Dask worker processes (adjust based on your CPU cores)
 
 # Parameters for Marine Heatwave detection
 smoothPercentile = True  # Boolean switch to smooth threshold percentile timeseries
