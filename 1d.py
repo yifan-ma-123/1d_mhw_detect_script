@@ -11,16 +11,17 @@ from dask.distributed import Client, LocalCluster
 
 import os
 import time
+import gc
 import numpy as np
-import matplotlib.pyplot as plt
-import datetime
-from datetime import date, timedelta
-from matplotlib import cm
-import pyfesom2 as pf
 import netCDF4 as nc
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+from scipy import ndimage
+import pandas as pd
+import pyfesom2 as pf
+import xarray as xr
 from netCDF4 import Dataset
 from tqdm import tqdm
-import gc
 from scipy import signal
 import scipy.ndimage as ndimage
 import calendar
@@ -377,7 +378,7 @@ def process_temp_data_in_chunks(mesh, years, arctic_nodes, depth_layers, chunk_s
                 delayed_tasks = []
                 for chunk_idx, node_chunk in enumerate(node_chunks):
                     # Use dask.delayed to properly wrap the function for distributed execution
-                    task = process_single_chunk(mesh, years, chunk_idx, node_chunk, depth_idx)
+                    task = dask.delayed(process_single_chunk)(mesh, years, chunk_idx, node_chunk, depth_idx)
                     delayed_tasks.append((chunk_idx, node_chunk, task))
                 
                 # Compute all tasks in parallel
@@ -485,60 +486,80 @@ def process_single_chunk(mesh, years, chunk_idx, node_chunk, depth_idx):
     chunk_start_time = time.time()
     print(f"\nProcessing chunk {chunk_idx} (nodes {node_chunk[0]}-{node_chunk[-1]})")
     
-    # Load temperature data for this chunk of nodes and all years
+    # Load temperature data for this chunk of nodes and all years using xarray
     load_start_time = time.time()
-    chunk_data = []
-    time_values = []
-    year_array = []
-    month_array = []
     
-    for year in years:
-        try:
-            # Construct the file path for this year
-            file_path = f"{datapath}/temp.fesom.{year}.nc"
-            
-            # Open the netCDF file
-            with nc.Dataset(file_path, 'r') as nc_file:
-                # Extract temperature data for this chunk of nodes at the specified depth
-                print(f"Loading data for year {year}, depth {depth_idx}, nodes {len(node_chunk)}")
-                temp_data = nc_file.variables[temp_var_name][:, depth_idx, node_chunk]
-                chunk_data.append(temp_data)
-                
-                # Extract time values from the file
-                time_var = nc_file.variables['time']
-                
-                # Get time units and convert to datetime objects
-                time_units = time_var.units
-                try:
-                    # Use netCDF4's built-in date conversion if available
-                    times = nc.num2date(time_var[:], time_units)
-                    
-                    # Extract year and month for each time step
-                    for t in times:
-                        time_values.append(t)
-                        year_array.append(t.year)
-                        month_array.append(t.month)
-                except AttributeError:
-                    print("Warning: Could not convert times automatically. Using time indices.")
-                    exit()
-        except Exception as e:
-            print(f"Error loading data for year {year}, depth {depth_idx}: {e}")
+    # Prepare file paths for all years
+    file_paths = [f"{datapath}/temp.fesom.{year}.nc" for year in years]
+    
+    # Check if files exist
+    for path in file_paths:
+        if not os.path.exists(path):
+            print(f"File not found: {path}")
+            return None
+    
+    try:
+        print(f"Loading data for depth {depth_idx}, nodes {len(node_chunk)}")
+        
+        # Open all files as a single dataset with xarray
+        # Use chunks to enable dask-based lazy loading
+        ds = xr.open_mfdataset(file_paths, combine='by_coords', chunks={'time': 'auto'})
+        
+        # Extract only the data we need (specific nodes and depth)
+        # This uses indexing which is more efficient than loading everything
+        if 'nz1' in ds[temp_var_name].dims:
+            temp_data = ds[temp_var_name].isel(nz1=depth_idx, nod2=node_chunk)
+        elif 'depth' in ds[temp_var_name].dims:
+            temp_data = ds[temp_var_name].isel(depth=depth_idx, nod2=node_chunk)
+        else:
+            print(f"Error: Could not identify depth dimension in dataset")
             return None
         
-    if not chunk_data:
-        print(f"No data was loaded for chunk {chunk_idx+1}. Skipping.")
+        # Convert to numpy array (triggers actual data loading)
+        combined_chunk = temp_data.values
+        
+        # Extract time information
+        time_values = ds.time.values
+        
+        # Convert time to datetime objects if they aren't already
+        if not np.issubdtype(time_values.dtype, np.datetime64):
+            try:
+                time_units = ds.time.attrs.get('units')
+                if time_units:
+                    time_values = nc.num2date(ds.time.values, time_units)
+                else:
+                    print("Warning: Time variable has no units attribute")
+                    return None
+            except Exception as e:
+                print(f"Error converting time values: {e}")
+                exit()
+        
+        # Create year and month arrays
+        if isinstance(time_values[0], np.datetime64):
+            # Convert numpy datetime64 to python datetime
+            time_values = pd.DatetimeIndex(time_values).to_pydatetime()
+        
+        year_array = np.array([t.year for t in time_values])
+        month_array = np.array([t.month for t in time_values])
+        
+        # Close the dataset to free up resources
+        ds.close()
+        
+        print(f"Data loading completed in {time.time() - load_start_time:.2f} seconds")
+        print(f"Combined chunk data shape: {combined_chunk.shape}")
+        print(f"Time array shape: {len(time_values)}")
+        
+    except Exception as e:
+        print(f"Error loading data: {e}")
         return None
         
-    print(f"Data loading for chunk {chunk_idx+1} completed in {time.time() - load_start_time:.2f} seconds")
     
     # Convert to numpy arrays
     time_array = np.array(time_values)
     year_array = np.array(year_array)
     month_array = np.array(month_array)
     
-    # Combine all years of data for this chunk
-    combined_chunk = np.vstack(chunk_data)
-    print(f"Combined chunk data shape: {combined_chunk.shape}")
+    # combined_chunk is already created in the xarray section
     print(f"Time array shape: {time_array.shape}")
     
     # Detect marine heatwaves for this chunk
@@ -642,7 +663,15 @@ if __name__ == "__main__":
             
             # Determine discrete colormap levels for events/year
             # Find the max value and create discrete bins
-            max_events = np.ceil(np.max(z)) if len(z) > 0 else 5
+            if len(z) > 0 and not np.all(np.isnan(z)):
+                max_events = np.ceil(np.nanmax(z))
+            else:
+                max_events = 5  # Default if no data
+            
+            # Ensure we have at least 2 levels for BoundaryNorm
+            if max_events < 1:
+                max_events = 1
+                
             levels = np.arange(0, max_events + 1, 1)  # Integer bins
             norm = plt.cm.colors.BoundaryNorm(levels, plt.cm.get_cmap('viridis').N)
             
